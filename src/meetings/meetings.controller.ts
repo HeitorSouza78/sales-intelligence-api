@@ -10,6 +10,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import {
   type AuthenticatedRequest,
   JwtAuthGuard,
@@ -26,27 +27,28 @@ import {
 } from './meetings.service.js';
 import { WebhookSecretGuard } from './webhook-secret.guard.js';
 
-// TODO(Fase 3 - Auth): Substituir pelo req.user.id extraído do JwtAuthGuard nas rotas GET também.
-const MOCK_USER_ID = '11111111-1111-4111-8111-111111111111';
-
 @Controller('meetings')
 export class MeetingsController {
   constructor(private readonly meetingsService: MeetingsService) {}
 
   @Get()
-  findAll(): Promise<MeetingListItem[]> {
-    return this.meetingsService.findAllByUser(MOCK_USER_ID);
+  @UseGuards(JwtAuthGuard)
+  findAll(@Req() req: AuthenticatedRequest): Promise<MeetingListItem[]> {
+    return this.meetingsService.findAllByUser(req.user.id);
   }
 
   @Get(':id')
+  @UseGuards(JwtAuthGuard)
   findOne(
+    @Req() req: AuthenticatedRequest,
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<MeetingDetailResponse> {
-    return this.meetingsService.findOneById(id, MOCK_USER_ID);
+    return this.meetingsService.findOneById(id, req.user.id);
   }
 
   @Post('upload-url')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(ThrottlerGuard, JwtAuthGuard)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   createUploadUrl(
     @Req() req: AuthenticatedRequest,
     @Body() dto: CreateUploadUrlDto,
