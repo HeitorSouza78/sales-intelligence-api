@@ -242,15 +242,29 @@ export class MeetingsService {
     }
 
     try {
-      await this.prisma.meeting.create({
-        data: {
-          id: meetingId,
-          title: dto.title.trim(),
-          scheduledAt: new Date(),
-          videoUrl: `s3://${this.bucket}/${key}`,
-          status: MeetingStatus.PENDING,
-          userId,
-        },
+      await this.prisma.$transaction(async (tx) => {
+        // Garante que o usuário exista (útil em bancos novos como Supabase antes do cadastro real).
+        await tx.user.upsert({
+          where: { id: userId },
+          update: {},
+          create: {
+            id: userId,
+            name: 'Usuário MVP',
+            email: `${userId}@sales-intelligence.local`,
+            passwordHash: 'mvp-demo-only',
+          },
+        });
+
+        await tx.meeting.create({
+          data: {
+            id: meetingId,
+            title: dto.title.trim(),
+            scheduledAt: new Date(),
+            videoUrl: `s3://${this.bucket}/${key}`,
+            status: MeetingStatus.PENDING,
+            userId,
+          },
+        });
       });
     } catch (error) {
       this.logger.error('Failed to create meeting', error);
