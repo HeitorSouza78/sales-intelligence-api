@@ -24,13 +24,18 @@ export interface MeetingAnalyzedEvent {
   audioUrl?: string;
 }
 
+const DEFAULT_WS_ORIGINS = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3000',
+  'https://sales-intelligence-web-delta.vercel.app',
+];
+
 @WebSocketGateway({
   cors: {
-    origin: [
-      'http://localhost:5173',
-      'http://127.0.0.1:5173',
-      'http://localhost:3000',
-    ],
+    origin: process.env.CORS_ORIGIN
+      ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim())
+      : DEFAULT_WS_ORIGINS,
     credentials: true,
   },
 })
