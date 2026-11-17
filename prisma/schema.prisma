@@ -1,0 +1,91 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ───────────────────────────────────────────────
+
+enum UserRole {
+  SELLER
+  MANAGER
+}
+
+enum MeetingStatus {
+  PENDING
+  EXTRACTING_AUDIO
+  ANALYZING
+  COMPLETED
+  FAILED
+}
+
+enum ActionItemType {
+  OBJECTION // objeção do cliente
+  TASK // tarefa / próximo passo
+  BUDGET // orçamento mencionado
+}
+
+// ─── Models ──────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         UserRole @default(SELLER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  meetings Meeting[]
+
+  @@map("users")
+}
+
+model Meeting {
+  id            String        @id @default(uuid()) @db.Uuid
+  title         String
+  scheduledAt   DateTime // data da reunião
+  videoUrl      String // URL do vídeo original no S3
+  audioUrl      String? // URL do áudio extraído (preenchido após o processamento)
+  status        MeetingStatus @default(PENDING)
+  userId        String        @db.Uuid
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  complianceScore ComplianceScore?
+  actionItems     ActionItem[]
+
+  @@index([userId])
+  @@index([status])
+  @@map("meetings")
+}
+
+model ComplianceScore {
+  id        String   @id @default(uuid()) @db.Uuid
+  meetingId String   @unique @db.Uuid
+  score     Decimal  @db.Decimal(5, 2) // pontuação geral (0–100)
+  notes     String? // observações de conformidade geradas pela IA
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@map("compliance_scores")
+}
+
+model ActionItem {
+  id          String         @id @default(uuid()) @db.Uuid
+  meetingId   String         @db.Uuid
+  type        ActionItemType
+  description String
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, type])
+  @@map("action_items")
+}
