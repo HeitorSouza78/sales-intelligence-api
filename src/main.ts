@@ -7,13 +7,14 @@ async function bootstrap() {
     instrument: ObserveInstrument,
   });
   app.enableCors({
-    origin: [
-      'http://localhost:5173',
-      'http://127.0.0.1:5173',
-      'http://localhost:3000',
-    ],
-    credentials: true,
-  });
+  origin: [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:3000',
+    'https://sales-intelligence-web-delta.vercel.app'
+  ],
+  credentials: true,
+});
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
