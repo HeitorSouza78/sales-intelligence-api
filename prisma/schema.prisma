@@ -13,6 +13,11 @@ enum UserRole {
   MANAGER
 }
 
+enum Plan {
+  BASIC
+  ENTERPRISE
+}
+
 enum MeetingStatus {
   PENDING
   EXTRACTING_AUDIO
@@ -33,10 +38,12 @@ model User {
   id           String   @id @default(uuid()) @db.Uuid
   name         String
   email        String   @unique
-  passwordHash String
-  role         UserRole @default(SELLER)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  passwordHash     String // hash argon2id — NUNCA retornar na API
+  refreshTokenHash String? // hash argon2id do refresh token ativo (null = sessão encerrada)
+  role             UserRole @default(SELLER)
+  plan             Plan     @default(BASIC) // Tiering de IA (Basic -> modelo leve, Enterprise -> modelo avançado)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   meetings Meeting[]
 

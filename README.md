@@ -32,9 +32,9 @@ React (Vite) ──[1. POST /meetings/upload-url (JWT)]──▶ NestJS API
 ## Segurança e Transparência de Dados
 
 - **Bucket S3 Privado + Presigned URLs:** Nenhum vídeo é público. Uploads usam URLs assinadas (`PutObjectCommand`) válidas por 15 minutos com `ContentType: video/mp4` e `ContentLength` assinados; reproduções no player usam `GetObjectCommand` válidas por 1 hora.
-- **Autenticação JWT + Trava de Demonstração:** Rotas `/meetings`, `/meetings/:id` e `/meetings/upload-url` protegidas por `JwtAuthGuard` (`passport-jwt`). A rota `/auth/login/dev` exige o código `DEMO_ACCESS_CODE` validado com `timingSafeEqual`.
+- **Autenticação Multi-Tenant Real (JWT + Argon2id):** Cadastro (`POST /auth/register`), login (`POST /auth/login`), rotação de refresh token com detecção de reuso (`POST /auth/refresh`), logout (`POST /auth/logout`) e perfil (`GET /auth/me`). Senhas e refresh tokens usam hash `argon2id` e nunca retornam nas respostas. Rotas `/meetings`, `/meetings/:id` e `/meetings/upload-url` exigem `JwtAuthGuard` e isolam dados por `userId` (anti-IDOR), assim como o handshake do WebSocket (`MeetingsGateway`), que isola eventos em salas privadas por usuário.
 - **Webhook Autenticado:** `POST /meetings/webhook/aws` protegido por `WebhookSecretGuard` (`x-webhook-secret` comparado em tempo constante via SHA-256 + `timingSafeEqual`).
-- **Rate Limiting (`@nestjs/throttler`):** Limite global de 30 req/min, 10 tentativas/min no login e 5 uploads/min por IP.
+- **Rate Limiting (`@nestjs/throttler`):** Limite global de 30 req/min, 5 tentativas/min em register/login e 5 uploads/min por IP.
 - **Isolamento em Warm Starts (Lambda):** Todo processamento de mídia no `/tmp` da AWS Lambda ocorre em diretório efêmero exclusivo (`mkdtemp`) e é removido no bloco `finally`.
 - **Ciclo de Vida (S3 Lifecycle):** Regra configurada para expirar automaticamente objetos de teste em `meetings/` após 7 dias.
 - **Consistência Transacional:** Persistência de `Meeting`, `ComplianceScore` (nota e resumo + palavras-chave em `notes`) e `ActionItem`s executada atomicamente via `prisma.$transaction`.
@@ -55,8 +55,8 @@ React (Vite) ──[1. POST /meetings/upload-url (JWT)]──▶ NestJS API
 ```env
 PORT=3000
 DATABASE_URL="postgresql://usuario:senha@host:5432/postgres"
-JWT_SECRET="sua-chave-jwt-forte"
-DEMO_ACCESS_CODE="codigo-de-acesso-demo"
+JWT_SECRET="sua-chave-jwt-access-forte"
+JWT_REFRESH_SECRET="outra-chave-jwt-refresh-diferente"
 CORS_ORIGIN="http://localhost:5173,https://seu-frontend.vercel.app"
 
 AWS_REGION="us-east-2"

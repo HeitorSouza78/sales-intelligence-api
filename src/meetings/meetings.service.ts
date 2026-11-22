@@ -13,9 +13,10 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ActionItemType, MeetingStatus } from '@prisma/client';
+import { ActionItemType, MeetingStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AwsWebhookDto } from './dto/aws-webhook.dto.js';
 import {
@@ -83,12 +84,12 @@ export class MeetingsService {
       region: config.getOrThrow<string>('AWS_REGION'),
       ...(accessKeyId && secretAccessKey
         ? {
-            credentials: {
-              accessKeyId,
-              secretAccessKey,
-              ...(sessionToken ? { sessionToken } : {}),
-            },
-          }
+          credentials: {
+            accessKeyId,
+            secretAccessKey,
+            ...(sessionToken ? { sessionToken } : {}),
+          },
+        }
         : {}),
     });
   }
@@ -133,12 +134,12 @@ export class MeetingsService {
       videoUrl: signedVideoUrl,
       complianceScore: meeting.complianceScore
         ? {
-            id: meeting.complianceScore.id,
-            score: Number(meeting.complianceScore.score),
-            notes: meeting.complianceScore.notes,
-            createdAt: meeting.complianceScore.createdAt,
-            updatedAt: meeting.complianceScore.updatedAt,
-          }
+          id: meeting.complianceScore.id,
+          score: Number(meeting.complianceScore.score),
+          notes: meeting.complianceScore.notes,
+          createdAt: meeting.complianceScore.createdAt,
+          updatedAt: meeting.complianceScore.updatedAt,
+        }
         : null,
       actionItems: meeting.actionItems.map((item) => ({
         id: item.id,
@@ -242,31 +243,24 @@ export class MeetingsService {
     }
 
     try {
-      await this.prisma.$transaction(async (tx) => {
-        // Garante que o usuário exista (útil em bancos novos como Supabase antes do cadastro real).
-        await tx.user.upsert({
-          where: { id: userId },
-          update: {},
-          create: {
-            id: userId,
-            name: 'Usuário MVP',
-            email: `${userId}@sales-intelligence.local`,
-            passwordHash: 'mvp-demo-only',
-          },
-        });
-
-        await tx.meeting.create({
-          data: {
-            id: meetingId,
-            title: dto.title.trim(),
-            scheduledAt: new Date(),
-            videoUrl: `s3://${this.bucket}/${key}`,
-            status: MeetingStatus.PENDING,
-            userId,
-          },
-        });
+      // userId vem SEMPRE do JWT validado; nunca do corpo da requisição.
+      await this.prisma.meeting.create({
+        data: {
+          id: meetingId,
+          title: dto.title.trim(),
+          scheduledAt: new Date(),
+          videoUrl: `s3://${this.bucket}/${key}`,
+          status: MeetingStatus.PENDING,
+          userId,
+        },
       });
     } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2003'
+      ) {
+        throw new UnauthorizedException('User no longer exists');
+      }
       this.logger.error('Failed to create meeting', error);
       throw new InternalServerErrorException('Could not create meeting');
     }
@@ -314,49 +308,34 @@ export class MeetingsService {
       .filter((item) => item.description.length > 0);
 
     try {
-      await this.prisma.$transaction(async (tx) => {
+      const ownerUserId = await this.prisma.$transaction(async (tx) => {
         const existing = await tx.meeting.findUnique({
           where: { id: dto.meetingId },
-          select: { id: true },
+          select: { id: true, userId: true },
         });
 
+        // Sem fallback: o webhook nunca cria reuniões nem atribui dono arbitrário.
         if (!existing) {
-          // Caso o vídeo tenha sido enviado manualmente no console do S3 para teste,
-          // garante a criação do usuário/reunião para não falhar com 404.
-          const fallbackUserId = '11111111-1111-4111-8111-111111111111';
-          await tx.user.upsert({
-            where: { id: fallbackUserId },
-            update: {},
-            create: {
-              id: fallbackUserId,
-              name: 'Usuário de Teste S3',
-              email: 'teste-s3@sales-intelligence.local',
-              passwordHash: 'test-only',
-            },
-          });
-
-          await tx.meeting.create({
-            data: {
-              id: dto.meetingId,
-              title: 'Reunião (Upload Manual S3)',
-              scheduledAt: new Date(),
-              videoUrl: dto.audioUrl
-                ? dto.audioUrl.replace(/\/audio\.mp3$/, '/original.mp4')
-                : `s3://${this.bucket}/meetings/${fallbackUserId}/${dto.meetingId}/original.mp4`,
-              audioUrl: dto.audioUrl ?? null,
-              status: dto.status ?? MeetingStatus.COMPLETED,
-              userId: fallbackUserId,
-            },
-          });
-        } else {
-          await tx.meeting.update({
-            where: { id: dto.meetingId },
-            data: {
-              status: dto.status ?? MeetingStatus.COMPLETED,
-              ...(dto.audioUrl ? { audioUrl: dto.audioUrl } : {}),
-            },
-          });
+          throw new NotFoundException(`Meeting ${dto.meetingId} not found`);
         }
+
+        // Garante que o audioUrl pertence ao prefixo do dono e da reunião.
+        if (
+          dto.audioUrl &&
+          !dto.audioUrl.includes(`meetings/${existing.userId}/${existing.id}/`)
+        ) {
+          throw new BadRequestException(
+            'audioUrl does not belong to this meeting',
+          );
+        }
+
+        await tx.meeting.update({
+          where: { id: dto.meetingId },
+          data: {
+            status: dto.status ?? MeetingStatus.COMPLETED,
+            ...(dto.audioUrl ? { audioUrl: dto.audioUrl } : {}),
+          },
+        });
 
         await tx.complianceScore.upsert({
           where: { meetingId: dto.meetingId },
@@ -380,13 +359,15 @@ export class MeetingsService {
             data: normalizedActionItems,
           });
         }
+
+        return existing.userId;
       });
 
       this.logger.log(
         `[AWS Webhook Salvo com Sucesso] meetingId=${dto.meetingId} | score=${resolvedScore} | itens=${normalizedActionItems.length}`,
       );
 
-      this.meetingsGateway.emitMeetingAnalyzed({
+      this.meetingsGateway.emitMeetingAnalyzed(ownerUserId, {
         meetingId: dto.meetingId,
         status: dto.status ?? MeetingStatus.COMPLETED,
         complianceScore: resolvedScore,

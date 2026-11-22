@@ -2,12 +2,8 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import type { JwtPayload } from './auth.constants.js';
 import type { AuthenticatedUser } from './jwt-auth.guard.js';
-
-export interface JwtPayload {
-  sub: string;
-  role?: string;
-}
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -16,11 +12,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
       secretOrKey: config.getOrThrow<string>('JWT_SECRET'),
+      algorithms: ['HS256'],
     });
   }
 
   validate(payload: JwtPayload): AuthenticatedUser {
-    if (!payload?.sub) {
+    // Só Access Tokens são aceitos nas rotas protegidas (refresh tokens e
+    // tokens legados sem `type` são rejeitados).
+    if (!payload?.sub || payload.type !== 'access') {
       throw new UnauthorizedException('Token JWT inválido');
     }
     return { id: payload.sub };
