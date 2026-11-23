@@ -1,9 +1,17 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import {
+  BadRequestException,
+  NotFoundException,
+  UnauthorizedException,
+  ValidationPipe,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { ActionItemType, MeetingStatus } from '@prisma/client';
+import { ActionItemType, MeetingStatus, Plan } from '@prisma/client';
 import { vi } from 'vitest';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { CreateUploadUrlDto } from './dto/create-upload-url.dto.js';
 import { MeetingsGateway } from './meetings.gateway.js';
 import { MeetingsService } from './meetings.service.js';
 
@@ -72,8 +80,18 @@ describe('MeetingsService & MeetingsGateway', () => {
       ],
     });
 
+    const userFindUniqueMock = vi
+      .fn()
+      .mockResolvedValue({ id: OWNER_ID, plan: Plan.BASIC });
+    const meetingCreateMock = vi.fn().mockResolvedValue({});
+
     const prisma = {
-      meeting: { findMany: findManyMock, findFirst: findFirstMock },
+      user: { findUnique: userFindUniqueMock },
+      meeting: {
+        findMany: findManyMock,
+        findFirst: findFirstMock,
+        create: meetingCreateMock,
+      },
       $transaction: vi.fn(
         async (cb: (client: typeof tx) => Promise<unknown>) => cb(tx),
       ),
@@ -102,6 +120,8 @@ describe('MeetingsService & MeetingsGateway', () => {
       service,
       tx,
       prisma,
+      userFindUniqueMock,
+      meetingCreateMock,
       findManyMock,
       findFirstMock,
       serverTo,
@@ -222,5 +242,85 @@ describe('MeetingsService & MeetingsGateway', () => {
       }),
     ).rejects.toThrow();
     expect(roomEmit).not.toHaveBeenCalled();
+  });
+
+  it('createUploadUrl busca o plan real no banco, assina x-amz-meta-plan e ignora injeção de plan no payload', async () => {
+    const { service, userFindUniqueMock } = createService();
+    const signedUrlMock = vi.mocked(getSignedUrl);
+    signedUrlMock.mockClear();
+
+    // Usuário BASIC no banco tenta injetar plan: 'ENTERPRISE' no payload
+    userFindUniqueMock.mockResolvedValueOnce({
+      id: OWNER_ID,
+      plan: Plan.BASIC,
+    });
+
+    const injectedPayload = {
+      title: 'Reunião Comercial',
+      fileSize: 1024 * 1024,
+      plan: 'ENTERPRISE',
+    } as unknown as CreateUploadUrlDto;
+
+    const result = await service.createUploadUrl(OWNER_ID, injectedPayload);
+
+    expect(userFindUniqueMock).toHaveBeenCalledWith({
+      where: { id: OWNER_ID },
+      select: { id: true, plan: true },
+    });
+    expect(result.requiredHeaders).toEqual({
+      'Content-Type': 'video/mp4',
+      'x-amz-meta-plan': 'BASIC',
+    });
+
+    const command = signedUrlMock.mock.calls[0]?.[1];
+    expect(command).toBeInstanceOf(PutObjectCommand);
+    expect((command as PutObjectCommand).input.Metadata).toEqual({
+      plan: 'BASIC',
+    });
+
+    // ValidationPipe global (forbidNonWhitelisted) bloqueia campo extra `plan` na borda HTTP
+    const pipe = new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    });
+    await expect(
+      pipe.transform(
+        { title: 'Reunião', fileSize: 1024, plan: 'ENTERPRISE' },
+        { type: 'body', metatype: CreateUploadUrlDto },
+      ),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('createUploadUrl propaga ENTERPRISE quando o usuário no banco é ENTERPRISE', async () => {
+    const { service, userFindUniqueMock } = createService();
+    const signedUrlMock = vi.mocked(getSignedUrl);
+    signedUrlMock.mockClear();
+
+    userFindUniqueMock.mockResolvedValueOnce({
+      id: OWNER_ID,
+      plan: Plan.ENTERPRISE,
+    });
+
+    const result = await service.createUploadUrl(OWNER_ID, {
+      title: 'Negociação Enterprise',
+      fileSize: 2048,
+    });
+
+    expect(result.requiredHeaders).toEqual({
+      'Content-Type': 'video/mp4',
+      'x-amz-meta-plan': 'ENTERPRISE',
+    });
+    const command = signedUrlMock.mock.calls[0]?.[1] as PutObjectCommand;
+    expect(command.input.Metadata).toEqual({ plan: 'ENTERPRISE' });
+  });
+
+  it('createUploadUrl lança UnauthorizedException se o usuário não existir no banco', async () => {
+    const { service, userFindUniqueMock } = createService();
+    userFindUniqueMock.mockResolvedValueOnce(null);
+
+    await expect(
+      service.createUploadUrl(OWNER_ID, { title: 'Teste', fileSize: 1024 }),
+    ).rejects.toThrow(UnauthorizedException);
   });
 });

@@ -219,14 +219,26 @@ export class MeetingsService {
       );
     }
 
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, plan: true },
+    });
+    if (!user) {
+      throw new UnauthorizedException('User no longer exists');
+    }
+
     const meetingId = randomUUID();
     // A chave é gerada pelo servidor: o cliente nunca controla o path no S3.
     const key = `meetings/${userId}/${meetingId}/original.mp4`;
+    const requiredHeaders: Record<string, string> = {
+      'Content-Type': ALLOWED_CONTENT_TYPE,
+      'x-amz-meta-plan': user.plan,
+    };
 
     let uploadUrl: string;
     try {
-      // ContentType e ContentLength entram na assinatura: o S3 rejeita
-      // uploads com tipo ou tamanho diferentes dos autorizados.
+      // ContentType, ContentLength e Metadata.plan (x-amz-meta-plan) entram
+      // na assinatura SigV4: o S3 rejeita qualquer tentativa de adulterar o plano.
       uploadUrl = await getSignedUrl(
         this.s3,
         new PutObjectCommand({
@@ -234,6 +246,7 @@ export class MeetingsService {
           Key: key,
           ContentType: ALLOWED_CONTENT_TYPE,
           ContentLength: dto.fileSize,
+          Metadata: { plan: user.plan },
         }),
         { expiresIn: PRESIGNED_URL_TTL_SECONDS },
       );
@@ -270,6 +283,7 @@ export class MeetingsService {
       uploadUrl,
       contentType: ALLOWED_CONTENT_TYPE,
       expiresInSeconds: PRESIGNED_URL_TTL_SECONDS,
+      requiredHeaders,
     };
   }
 

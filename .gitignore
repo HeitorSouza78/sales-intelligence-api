@@ -49,6 +49,9 @@ lerna-debug.log*
 .temp
 .tmp
 
+# build artifacts / lambda packages
+infra/dist/
+
 # Runtime data
 pids
 *.pid

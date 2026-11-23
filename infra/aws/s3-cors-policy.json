@@ -1,0 +1,23 @@
+{
+  "CORSRules": [
+    {
+      "AllowedHeaders": [
+        "Content-Type",
+        "x-amz-meta-plan"
+      ],
+      "AllowedMethods": [
+        "PUT",
+        "GET",
+        "HEAD"
+      ],
+      "AllowedOrigins": [
+        "http://localhost:5173",
+        "https://sales-intelligence-web-delta.vercel.app"
+      ],
+      "ExposeHeaders": [
+        "ETag"
+      ],
+      "MaxAgeSeconds": 3000
+    }
+  ]
+}

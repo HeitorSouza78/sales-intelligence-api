@@ -82,6 +82,9 @@ AUDIO_SAMPLE_RATE: Final[int] = int(os.environ.get("AUDIO_SAMPLE_RATE", "16000")
 # Margem de espaço livre exigida além do tamanho do vídeo (para o MP3).
 DISK_SAFETY_MARGIN_BYTES: Final[int] = 256 * 1024**2
 
+VALID_PLANS: Final[frozenset[str]] = frozenset({"BASIC", "ENTERPRISE"})
+DEFAULT_PLAN: Final[str] = "BASIC"
+
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 SOURCE_KEY_PATTERN: Final[re.Pattern[str]] = re.compile(
     rf"^meetings/(?P<user_id>{_UUID})/(?P<meeting_id>{_UUID})/original\.mp4$"
@@ -243,6 +246,14 @@ def cleanup(workdir: Path | None) -> None:
         logger.exception("Falha ao limpar diretório temporário %s", workdir)
 
 
+def normalize_plan(raw_plan: str | None) -> str:
+    """Valida o plano contra allowlist estrita com fallback seguro para BASIC."""
+    if not raw_plan:
+        return DEFAULT_PLAN
+    candidate = str(raw_plan).strip().upper()
+    return candidate if candidate in VALID_PLANS else DEFAULT_PLAN
+
+
 def process_video(source: SourceVideo, declared_size: int) -> str:
     """Executa o ETL completo de um vídeo. Retorna a key do áudio gerado."""
     workdir: Path | None = None
@@ -252,15 +263,18 @@ def process_video(source: SourceVideo, declared_size: int) -> str:
         video_path = workdir / "original.mp4"
         audio_path = workdir / "audio.mp3"
 
-        # Fonte de verdade do tamanho: metadados atuais do objeto no S3.
+        # Fonte de verdade do tamanho e do plano: metadados atuais no S3.
         head = s3_client.head_object(Bucket=source.bucket, Key=source.key)
         video_size = int(head.get("ContentLength", declared_size))
+        metadata = head.get("Metadata") or {}
+        plan = normalize_plan(metadata.get("plan"))
         ensure_capacity(video_size, workdir)
 
         logger.info(
-            "Baixando vídeo meeting=%s user=%s size=%d",
+            "Baixando vídeo meeting=%s user=%s plan=%s size=%d",
             source.meeting_id,
             source.user_id,
+            plan,
             video_size,
         )
         s3_client.download_file(source.bucket, source.key, str(video_path))
@@ -272,13 +286,19 @@ def process_video(source: SourceVideo, declared_size: int) -> str:
         video_path.unlink(missing_ok=True)
 
         logger.info(
-            "Enviando áudio meeting=%s key=%s", source.meeting_id, source.audio_key
+            "Enviando áudio meeting=%s key=%s plan=%s",
+            source.meeting_id,
+            source.audio_key,
+            plan,
         )
         s3_client.upload_file(
             str(audio_path),
             source.bucket,
             source.audio_key,
-            ExtraArgs={"ContentType": "audio/mpeg"},
+            ExtraArgs={
+                "ContentType": "audio/mpeg",
+                "Metadata": {"plan": plan},
+            },
         )
         return source.audio_key
     finally:

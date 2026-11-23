@@ -1,0 +1,9 @@
+# Dependências Python das AWS Lambdas (Python 3.12 — compatível com arm64 / Graviton2 e x86_64)
+#
+# - boto3 e botocore já vêm pré-instalados no runtime oficial AWS Lambda Python 3.12.
+# - aws-lambdas/ffmpeg.py é um wrapper 100% Python puro (stdlib subprocess), sem extensões C nativas.
+# - O binário estático /opt/bin/ffmpeg é fornecido via AWS Lambda Layer compilada para arm64
+#   (gere com infra/scripts/build-ffmpeg-layer-arm64.sh).
+#
+# Caso precise rodar testes ou scripts fora da AWS Lambda localmente:
+boto3>=1.35.0

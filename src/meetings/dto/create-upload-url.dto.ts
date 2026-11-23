@@ -21,4 +21,5 @@ export interface UploadUrlResponse {
   uploadUrl: string;
   contentType: string;
   expiresInSeconds: number;
+  requiredHeaders: Record<string, string>;
 }

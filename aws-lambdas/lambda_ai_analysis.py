@@ -41,9 +41,17 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
 AWS_REGION: Final[str] = os.environ.get("AWS_REGION", "us-east-2")
 BEDROCK_REGION: Final[str] = os.environ.get("BEDROCK_REGION", AWS_REGION)
-BEDROCK_MODEL_ID: Final[str] = os.environ.get(
-    "BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0"
+BEDROCK_MODEL_BASIC: Final[str] = (
+    os.environ.get("BEDROCK_MODEL_BASIC")
+    or os.environ.get("BEDROCK_MODEL_ID")
+    or "amazon.nova-lite-v1:0"
 ).strip()
+BEDROCK_MODEL_ENTERPRISE: Final[str] = (
+    os.environ.get("BEDROCK_MODEL_ENTERPRISE")
+    or "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+).strip()
+VALID_PLANS: Final[frozenset[str]] = frozenset({"BASIC", "ENTERPRISE"})
+DEFAULT_PLAN: Final[str] = "BASIC"
 WEBHOOK_URL: Final[str] = os.environ.get(
     "WEBHOOK_URL", "https://SEU_DOMINIO_OU_IP/meetings/webhook/aws"
 ).strip()
@@ -194,7 +202,9 @@ def transcribe_via_speech_api(source: SourceAudio) -> str:
 
         full_text = " ".join(transcribed_parts).strip()
         if full_text:
-            logger.info("Transcrição literal da fala concluída: %r", full_text)
+            logger.info(
+                "Transcrição de fala concluída (%d caracteres).", len(full_text)
+            )
             return full_text
 
         raise PipelineAnalysisError(
@@ -324,8 +334,61 @@ def _parse_and_validate_analysis(raw_text: str) -> BedrockAnalysisResult:
     }
 
 
-def analyze_transcript_with_bedrock(transcript_text: str) -> BedrockAnalysisResult:
-    """Envia a transcrição ao Amazon Bedrock e retorna análise estruturada."""
+def normalize_plan(raw_plan: str | None) -> str:
+    """Valida o plano contra allowlist estrita com fallback seguro para BASIC."""
+    if not raw_plan:
+        return DEFAULT_PLAN
+    candidate = str(raw_plan).strip().upper()
+    return candidate if candidate in VALID_PLANS else DEFAULT_PLAN
+
+
+def get_audio_plan(source: SourceAudio) -> str:
+    """Lê o metadado ``plan`` do objeto audio.mp3 no S3 (fallback seguro: BASIC)."""
+    try:
+        head = s3_client.head_object(Bucket=source.bucket, Key=source.key)
+        metadata = head.get("Metadata") or {}
+        return normalize_plan(metadata.get("plan"))
+    except (ClientError, BotoCoreError) as exc:
+        logger.warning(
+            "Falha ao ler metadado 'plan' de %s (%s). Usando fallback %s.",
+            source.key,
+            exc,
+            DEFAULT_PLAN,
+        )
+        return DEFAULT_PLAN
+
+
+def resolve_bedrock_model_candidates(plan: str) -> list[str]:
+    """Resolve a ordem de modelos Bedrock conforme o plano (Tiering de IA)."""
+    resolved_plan = normalize_plan(plan)
+    basic_model = (
+        os.environ.get("BEDROCK_MODEL_BASIC")
+        or os.environ.get("BEDROCK_MODEL_ID")
+        or BEDROCK_MODEL_BASIC
+    ).strip()
+    enterprise_model = (
+        os.environ.get("BEDROCK_MODEL_ENTERPRISE") or BEDROCK_MODEL_ENTERPRISE
+    ).strip()
+
+    if resolved_plan == "ENTERPRISE":
+        ordered = (enterprise_model, basic_model, "amazon.nova-lite-v1:0")
+    else:
+        ordered = (basic_model, "amazon.nova-lite-v1:0", "us.amazon.nova-lite-v1:0")
+
+    candidates: list[str] = []
+    for candidate in ordered:
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def analyze_transcript_with_bedrock(
+    transcript_text: str,
+    plan: str = DEFAULT_PLAN,
+    meeting_id: str | None = None,
+) -> BedrockAnalysisResult:
+    """Envia a transcrição ao Amazon Bedrock via Converse API (unificada Nova/Claude)."""
+    resolved_plan = normalize_plan(plan)
     system_prompt = (
         "Você é um auditor sênior de inteligência comercial e dados. "
         "Sua função é analisar a transcrição da reunião e extrair informações fiéis ao texto.\n"
@@ -359,21 +422,13 @@ Transcrição da reunião:
 \"\"\"
 """
 
-    candidates: list[str] = []
-    for candidate in (
-        BEDROCK_MODEL_ID,
-        "amazon.nova-lite-v1:0",
-        "us.amazon.nova-lite-v1:0",
-        "us.anthropic.claude-3-5-haiku-20241022-v1:0",
-    ):
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
+    candidates = resolve_bedrock_model_candidates(resolved_plan)
 
     raw_text = ""
+    used_model_id = ""
     last_exc: Exception | None = None
     for model_id in candidates:
         try:
-            logger.info("Invocando Amazon Bedrock modelId=%s", model_id)
             response = bedrock_runtime.converse(
                 modelId=model_id,
                 system=[{"text": system_prompt}],
@@ -383,14 +438,20 @@ Transcrição da reunião:
             blocks = response.get("output", {}).get("message", {}).get("content", [])
             raw_text = "".join(b.get("text", "") for b in blocks).strip()
             if raw_text:
-                logger.info("Resposta recebida do Bedrock (%s): %s", model_id, raw_text)
+                used_model_id = model_id
                 break
         except ClientError as exc:
             last_exc = exc
             logger.warning(
-                "Modelo Bedrock %s indisponível (%s), tentando próximo...",
-                model_id,
-                exc,
+                json.dumps(
+                    {
+                        "event": "bedrock_model_unavailable",
+                        "meetingId": meeting_id,
+                        "plan": resolved_plan,
+                        "modelId": model_id,
+                        "errorCode": exc.response.get("Error", {}).get("Code", "Unknown"),
+                    }
+                )
             )
 
     if not raw_text:
@@ -398,7 +459,22 @@ Transcrição da reunião:
             f"Não foi possível invocar nenhum modelo no Bedrock: {last_exc}"
         )
 
-    return _parse_and_validate_analysis(raw_text)
+    result = _parse_and_validate_analysis(raw_text)
+    logger.info(
+        json.dumps(
+            {
+                "event": "bedrock_analysis_completed",
+                "meetingId": meeting_id,
+                "plan": resolved_plan,
+                "modelId": used_model_id,
+                "transcriptChars": len(transcript_text),
+                "complianceScore": result["complianceScore"],
+                "meetingType": result["type"],
+                "actionItemsCount": len(result["actionItems"]),
+            }
+        )
+    )
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -473,24 +549,23 @@ def send_webhook(source: SourceAudio, analysis: BedrockAnalysisResult) -> None:
 
 def process_audio_record(record: dict[str, Any]) -> str:
     source = parse_audio_record(record)
+    plan = get_audio_plan(source)
     logger.info(
-        "Iniciando pipeline de IA meeting=%s user=%s key=%s",
-        source.meeting_id,
-        source.user_id,
-        source.key,
+        json.dumps(
+            {
+                "event": "ai_pipeline_started",
+                "meetingId": source.meeting_id,
+                "userId": source.user_id,
+                "plan": plan,
+                "key": source.key,
+            }
+        )
     )
     transcript_text = transcribe_audio(source)
-    logger.info(
-        "Texto transcrito meeting=%s (%d caracteres): %s",
-        source.meeting_id,
-        len(transcript_text),
+    analysis = analyze_transcript_with_bedrock(
         transcript_text,
-    )
-    analysis = analyze_transcript_with_bedrock(transcript_text)
-    logger.info(
-        "Análise Bedrock concluída meeting=%s resultado=%s",
-        source.meeting_id,
-        analysis,
+        plan=plan,
+        meeting_id=source.meeting_id,
     )
     send_webhook(source, analysis)
     return source.meeting_id

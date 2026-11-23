@@ -1,0 +1,20 @@
+{
+  "Rules": [
+    {
+      "ID": "meetings-to-glacier-instant-retrieval-7d",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "meetings/"
+      },
+      "Transitions": [
+        {
+          "Days": 7,
+          "StorageClass": "GLACIER_IR"
+        }
+      ],
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 1
+      }
+    }
+  ]
+}
