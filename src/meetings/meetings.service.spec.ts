@@ -269,7 +269,6 @@ describe('MeetingsService & MeetingsGateway', () => {
     });
     expect(result.requiredHeaders).toEqual({
       'Content-Type': 'video/mp4',
-      'x-amz-meta-plan': 'BASIC',
     });
 
     const command = signedUrlMock.mock.calls[0]?.[1];
@@ -309,7 +308,6 @@ describe('MeetingsService & MeetingsGateway', () => {
 
     expect(result.requiredHeaders).toEqual({
       'Content-Type': 'video/mp4',
-      'x-amz-meta-plan': 'ENTERPRISE',
     });
     const command = signedUrlMock.mock.calls[0]?.[1] as PutObjectCommand;
     expect(command.input.Metadata).toEqual({ plan: 'ENTERPRISE' });

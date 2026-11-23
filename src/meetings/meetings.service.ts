@@ -80,8 +80,10 @@ export class MeetingsService {
     const sessionToken = config.get<string>('AWS_SESSION_TOKEN');
 
     // Usa credenciais do .env quando definidas localmente; em produção (EC2/ECS) usa IAM Role.
+    // requestChecksumCalculation: 'WHEN_REQUIRED' evita x-amz-checksum-crc32=AAAAAA== em Presigned URLs.
     this.s3 = new S3Client({
       region: config.getOrThrow<string>('AWS_REGION'),
+      requestChecksumCalculation: 'WHEN_REQUIRED',
       ...(accessKeyId && secretAccessKey
         ? {
           credentials: {
@@ -230,9 +232,11 @@ export class MeetingsService {
     const meetingId = randomUUID();
     // A chave é gerada pelo servidor: o cliente nunca controla o path no S3.
     const key = `meetings/${userId}/${meetingId}/original.mp4`;
+    // O @aws-sdk/s3-request-presigner promove Metadata.plan para a query string
+    // assinada (&x-amz-meta-plan=...). Enviar x-amz-meta-plan também como header
+    // HTTP faz o S3 rejeitar o PUT com 403 AccessDenied (HeadersNotSigned).
     const requiredHeaders: Record<string, string> = {
       'Content-Type': ALLOWED_CONTENT_TYPE,
-      'x-amz-meta-plan': user.plan,
     };
 
     let uploadUrl: string;
